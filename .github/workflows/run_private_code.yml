@@ -1,0 +1,196 @@
+name: run-private-code
+
+on:
+  workflow_dispatch:
+    inputs:
+      private_repo:
+        description: 'owner/repo của PRIVATE'
+        required: true
+        default: 'andrew9qnplsx2f665smr-rgb/randautien'
+      private_ref:
+        description: 'Nhánh/tag trong PRIVATE'
+        required: true
+        default: 'main'   # nếu repo private dùng 'master' thì sửa thành 'master'
+      workdir:
+        description: 'Thư mục chạy trong PRIVATE (chứa scripts/generate_thumbnails.py)'
+        required: true
+        default: '.'
+      youtube_privacy:
+        description: 'Trạng thái khi đăng YouTube'
+        type: choice
+        options: ['public', 'unlisted', 'private']
+        default: 'public'
+
+jobs:
+  run-private:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: run-private-${{ github.ref }}
+      cancel-in-progress: false
+
+    env:
+      # Secrets YouTube (lấy từ repo PUBLIC)
+      YT_CLIENT_ID:     ${{ secrets.YT_CLIENT_ID }}
+      YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
+      YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
+      YOUTUBE_PRIVACY:  ${{ inputs.youtube_privacy }}
+
+    steps:
+      - name: Checkout wrapper (repo PUBLIC)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Quyết định mode auth mà KHÔNG dùng secrets trực tiếp trong if
+      - name: Determine auth mode
+        id: auth
+        env:
+          HAS_PAT: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          HAS_SSH: ${{ secrets.PRIVATE_SSH_KEY }}
+        run: |
+          if [ -n "$HAS_PAT" ]; then
+            echo "mode=pat" >> "$GITHUB_OUTPUT"
+          elif [ -n "$HAS_SSH" ]; then
+            echo "mode=ssh" >> "$GITHUB_OUTPUT"
+          else
+            echo "mode=none" >> "$GITHUB_OUTPUT"
+          fi
+          echo "Auth mode set."
+
+      # KÉO CODE từ repo PRIVATE bằng PAT
+      - name: Checkout PRIVATE via PAT
+        if: ${{ steps.auth.outputs.mode == 'pat' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.private_repo }}
+          ref: ${{ inputs.private_ref }}
+          path: private-src
+          fetch-depth: 1
+          token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+
+      # Hoặc bằng SSH Deploy Key
+      - name: Checkout PRIVATE via SSH Deploy Key
+        if: ${{ steps.auth.outputs.mode == 'ssh' }}
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.private_repo }}
+          ref: ${{ inputs.private_ref }}
+          path: private-src
+          fetch-depth: 1
+          ssh-key: ${{ secrets.PRIVATE_SSH_KEY }}
+
+      - name: Fail if no auth available
+        if: ${{ steps.auth.outputs.mode == 'none' }}
+        run: |
+          echo "::error::Không checkout được repo private. Cần PRIVATE_REPO_TOKEN (PAT) hoặc PRIVATE_SSH_KEY (Deploy key)."
+          exit 1
+
+      - name: Verify PRIVATE checkout
+        run: |
+          test -d private-src
+          echo "[OK] Code PRIVATE đã ở ./private-src"
+          ls -lah private-src | head -n 50
+
+      # Bắt buộc có secrets YT để up thẳng
+      - name: Require YT OAuth secrets
+        run: |
+          miss=0
+          for k in YT_CLIENT_ID YT_CLIENT_SECRET YT_REFRESH_TOKEN; do
+            if [ -z "${!k}" ]; then echo "::error::Thiếu secret $k"; miss=1; fi
+          done
+          if [ "$miss" = "1" ]; then
+            echo "Thiếu secrets YouTube -> dừng (flow này không tạo artifact/release)."
+            exit 1
+          fi
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps (ffmpeg)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('private-src/**/requirements*.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python deps
+        run: |
+          set -e
+          REQ=$(ls private-src/**/requirements*.txt 2>/dev/null | head -n1 || true)
+          if [ -n "$REQ" ]; then
+            echo "[INFO] Using requirements: $REQ"
+            pip install -r "$REQ"
+          else
+            echo "[INFO] No requirements*.txt found — install tối thiểu"
+            pip install Pillow opencv-python-headless numpy gdown \
+                        google-api-python-client google-auth google-auth-httplib2 \
+                        imageio-ffmpeg
+          fi
+
+      # CHẠY CODE ngay trong repo PRIVATE (upload YouTube trực tiếp)
+      - name: Run pipeline in PRIVATE
+        working-directory: private-src/${{ inputs.workdir }}
+        run: |
+          set -e
+          if [ ! -f "scripts/generate_thumbnails.py" ]; then
+            echo "::error::Không thấy scripts/generate_thumbnails.py trong $(pwd)"
+            ls -lah
+            exit 1
+          fi
+          python -u scripts/generate_thumbnails.py
+
+        # === Commit & PUSH qua PAT (HTTPS) ===
+      - name: Commit & push state CSVs back to PRIVATE (PAT)
+        if: ${{ steps.auth.outputs.mode == 'pat' }}
+        working-directory: private-src
+        env:
+          PUSH_TOKEN: ${{ secrets.PRIVATE_REPO_PUSH_TOKEN != '' && secrets.PRIVATE_REPO_PUSH_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ inputs.private_repo }}
+          PRIVATE_REF: ${{ inputs.private_ref }}
+        run: |
+          set -e
+          if [ -z "$PUSH_TOKEN" ]; then
+            echo "::error::Thiếu token có quyền ghi (PRIVATE_REPO_PUSH_TOKEN hoặc PRIVATE_REPO_TOKEN)."
+            exit 1
+          fi
+
+          FILES=""
+          for f in image_done.csv links_done.csv tieudedalay.csv; do
+            [ -f "$f" ] && FILES="$FILES $f"
+            if [ "${{ inputs.workdir }}" != "." ] && [ -f "${{ inputs.workdir }}/$f" ]; then
+              FILES="$FILES ${{ inputs.workdir }}/$f"
+            fi
+          done
+          if [ -z "$FILES" ]; then
+            echo "[INFO] Không có CSV để commit."
+            exit 0
+          fi
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${PRIVATE_REPO}.git"
+
+          CURBR=$(git rev-parse --abbrev-ref HEAD || true)
+          if [ "$CURBR" = "HEAD" ]; then
+            git checkout -b ci-state-update
+          fi
+
+          git add -- $FILES
+          if git diff --cached --quiet; then
+            echo "[INFO] Không có thay đổi trong CSV."
+            exit 0
+          fi
+
+          git commit -m "ci(state): update image_done.csv, links_done.csv, tieudedalay.csv"
+          git push origin HEAD:"${PRIVATE_REF}"
+
