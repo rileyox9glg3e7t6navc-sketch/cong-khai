@@ -6,7 +6,7 @@ on:
       private_repo:
         description: 'owner/repo của PRIVATE'
         required: true
-        default: 'andrew9qnplsx2f665smr-rgb/randautien'
+        default: 'andrew9qnplsx2f665smr-rgb/rieng-tu'
       private_ref:
         description: 'Nhánh/tag trong PRIVATE'
         required: true
