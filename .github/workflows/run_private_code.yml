@@ -1,10 +1,13 @@
 name: run-private-code
- on:
-   schedule:
-     - cron: '0 4  * * *'   # 09:00 VN (UTC+7 → 02:00 UTC)
-     - cron: '0 8  * * *'   # 15:00 VN (08:00 UTC)
-     - cron: '0 14 * * *'   # 21:00 VN (14:00 UTC)
-   workflow_dispatch: {}
+on:
+  workflow_dispatch: {}
+  schedule:
+    # 10:00 Asia/Bangkok (UTC+7) → 03:00 UTC
+    - cron: "0 4 * * *"
+    # 13:00 Asia/Bangkok (UTC+7) → 06:00 UTC
+    - cron: "0 6 * * *"
+    # 16:00 Asia/Bangkok (UTC+7) → 09:00 UTC
+    - cron: "0 9 * * *"
 
     inputs:
       private_repo:
