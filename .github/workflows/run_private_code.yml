@@ -136,12 +136,20 @@ jobs:
 
       # Bắt buộc có secrets YT để up thẳng
       - name: Require YT OAuth secrets
+        shell: bash
         run: |
           miss=0
           for k in YT_CLIENT_ID YT_CLIENT_SECRET YT_REFRESH_TOKEN; do
-            if [ -z "${!k}" ]; then echo "::error::Thiếu secret $k"; miss=1; fi
+            if [ -z "${!k}" ]; then
+              echo "::error::Thiếu secret $k"
+              miss=1
+            fi
           done
-          [ "$miss" = "1" ] && exit 1
+          if [ "$miss" = "1" ]; then
+            exit 1
+          fi
+          echo "[OK] YT secrets đầy đủ."
+
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
