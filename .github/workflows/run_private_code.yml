@@ -12,7 +12,7 @@ on:
       private_ref:
         description: 'Nhánh/tag trong PRIVATE'
         required: true
-        default: 'main'   # nếu repo private dùng 'master' thì sửa thành 'master'
+        default: 'main'
       workdir:
         description: 'Thư mục chạy trong PRIVATE (chứa scripts/generate_thumbnails.py)'
         required: true
@@ -33,7 +33,7 @@ jobs:
       cancel-in-progress: false
 
     env:
-      # Secrets YouTube (lấy từ repo PUBLIC)
+      # Secrets YouTube (đặt ở repo CÔNG KHAI)
       YT_CLIENT_ID:     ${{ secrets.YT_CLIENT_ID }}
       YT_CLIENT_SECRET: ${{ secrets.YT_CLIENT_SECRET }}
       YT_REFRESH_TOKEN: ${{ secrets.YT_REFRESH_TOKEN }}
@@ -45,7 +45,7 @@ jobs:
         with:
           fetch-depth: 1
 
-      # Quyết định mode auth mà KHÔNG dùng secrets trực tiếp trong if
+      # Quyết định mode auth (không dùng secrets trực tiếp trong if)
       - name: Determine auth mode
         id: auth
         env:
@@ -59,29 +59,46 @@ jobs:
           else
             echo "mode=none" >> "$GITHUB_OUTPUT"
           fi
-          echo "Auth mode set."
 
-      # KÉO CODE từ repo PRIVATE bằng PAT
+      # >>> FIX LỖI INPUTS KHI CHẠY THEO LỊCH <<<
+      - name: Resolve parameters (support schedule without inputs)
+        id: params
+        run: |
+          repo="${{ inputs.private_repo }}"
+          [ -z "$repo" ] && repo="rileyox9glg3e7t6navc-sketch/rieng-tu"
+          echo "repo=$repo" >> "$GITHUB_OUTPUT"
+
+          ref="${{ inputs.private_ref }}"
+          [ -z "$ref" ] && ref="main"
+          echo "ref=$ref" >> "$GITHUB_OUTPUT"
+
+          wd="${{ inputs.workdir }}"
+          [ -z "$wd" ] && wd="."
+          echo "workdir=$wd" >> "$GITHUB_OUTPUT"
+
+      # KÉO CODE từ repo PRIVATE (PAT)
       - name: Checkout PRIVATE via PAT
         if: ${{ steps.auth.outputs.mode == 'pat' }}
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.private_repo }}
-          ref: ${{ inputs.private_ref }}
+          repository: ${{ steps.params.outputs.repo }}
+          ref: ${{ steps.params.outputs.ref }}
           path: private-src
           fetch-depth: 1
           token: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          persist-credentials: false
 
-      # Hoặc bằng SSH Deploy Key
+      # KÉO CODE từ repo PRIVATE (SSH)
       - name: Checkout PRIVATE via SSH Deploy Key
         if: ${{ steps.auth.outputs.mode == 'ssh' }}
         uses: actions/checkout@v4
         with:
-          repository: ${{ inputs.private_repo }}
-          ref: ${{ inputs.private_ref }}
+          repository: ${{ steps.params.outputs.repo }}
+          ref: ${{ steps.params.outputs.ref }}
           path: private-src
           fetch-depth: 1
           ssh-key: ${{ secrets.PRIVATE_SSH_KEY }}
+          persist-credentials: false
 
       - name: Fail if no auth available
         if: ${{ steps.auth.outputs.mode == 'none' }}
@@ -90,10 +107,32 @@ jobs:
           exit 1
 
       - name: Verify PRIVATE checkout
+        working-directory: private-src
         run: |
-          test -d private-src
-          echo "[OK] Code PRIVATE đã ở ./private-src"
-          ls -lah private-src | head -n 50
+          pwd && ls -la
+          echo "== 20 files in commit =="
+          git ls-tree -r --name-only HEAD | head -n 20
+
+      # Tự tìm thư mục chứa scripts/generate_thumbnails.py (kể cả khi không nhập workdir)
+      - name: Detect script path
+        id: find_script
+        run: |
+          set -e
+          BASE="private-src"
+          DEFAULT="${{ steps.params.outputs.workdir }}"
+          CAND=""
+          if [ -n "$DEFAULT" ] && [ -f "$BASE/$DEFAULT/scripts/generate_thumbnails.py" ]; then
+            CAND="$BASE/$DEFAULT"
+          else
+            CAND=$(cd "$BASE" && find . -type f -path "*/scripts/generate_thumbnails.py" -print -quit | sed 's|^\./||' | xargs -I{} dirname {} )
+            [ -n "$CAND" ] && CAND="$BASE/$CAND"
+          fi
+          if [ -z "$CAND" ]; then
+            echo "::error::Không tìm thấy scripts/generate_thumbnails.py trong repo private."
+            exit 1
+          fi
+          echo "dir=$CAND" >> "$GITHUB_OUTPUT"
+          echo "[FOUND] $CAND"
 
       # Bắt buộc có secrets YT để up thẳng
       - name: Require YT OAuth secrets
@@ -102,10 +141,7 @@ jobs:
           for k in YT_CLIENT_ID YT_CLIENT_SECRET YT_REFRESH_TOKEN; do
             if [ -z "${!k}" ]; then echo "::error::Thiếu secret $k"; miss=1; fi
           done
-          if [ "$miss" = "1" ]; then
-            echo "Thiếu secrets YouTube -> dừng (flow này không tạo artifact/release)."
-            exit 1
-          fi
+          [ "$miss" = "1" ] && exit 1
 
       - name: Setup Python 3.11
         uses: actions/setup-python@v5
@@ -139,60 +175,82 @@ jobs:
                         imageio-ffmpeg
           fi
 
-      # CHẠY CODE ngay trong repo PRIVATE (upload YouTube trực tiếp)
+      # CHẠY CODE trong repo PRIVATE (upload YouTube trực tiếp)
       - name: Run pipeline in PRIVATE
-        working-directory: private-src/${{ inputs.workdir }}
+        working-directory: ${{ steps.find_script.outputs.dir }}
         run: |
           set -e
-          if [ ! -f "scripts/generate_thumbnails.py" ]; then
-            echo "::error::Không thấy scripts/generate_thumbnails.py trong $(pwd)"
-            ls -lah
-            exit 1
-          fi
           python -u scripts/generate_thumbnails.py
 
-        # === Commit & PUSH qua PAT (HTTPS) ===
+      # Commit & PUSH 3 CSV về repo PRIVATE qua PAT (nếu checkout bằng PAT)
       - name: Commit & push state CSVs back to PRIVATE (PAT)
         if: ${{ steps.auth.outputs.mode == 'pat' }}
         working-directory: private-src
         env:
-          PUSH_TOKEN: ${{ secrets.PRIVATE_REPO_PUSH_TOKEN != '' && secrets.PRIVATE_REPO_PUSH_TOKEN || secrets.PRIVATE_REPO_TOKEN }}
-          PRIVATE_REPO: ${{ inputs.private_repo }}
-          PRIVATE_REF: ${{ inputs.private_ref }}
+          PUSH_TOKEN_1: ${{ secrets.PRIVATE_REPO_PUSH_TOKEN }}
+          PUSH_TOKEN_2: ${{ secrets.PRIVATE_REPO_TOKEN }}
+          PRIVATE_REPO: ${{ steps.params.outputs.repo }}
+          PRIVATE_REF: ${{ steps.params.outputs.ref }}
+          DIR_FOUND: ${{ steps.find_script.outputs.dir }}
         run: |
           set -e
-          if [ -z "$PUSH_TOKEN" ]; then
-            echo "::error::Thiếu token có quyền ghi (PRIVATE_REPO_PUSH_TOKEN hoặc PRIVATE_REPO_TOKEN)."
-            exit 1
-          fi
+          TOKEN="${PUSH_TOKEN_1:-$PUSH_TOKEN_2}"
+          [ -z "$TOKEN" ] && { echo "::warning::Không có token có quyền ghi. Bỏ qua commit."; exit 0; }
 
           FILES=""
           for f in image_done.csv links_done.csv tieudedalay.csv; do
             [ -f "$f" ] && FILES="$FILES $f"
-            if [ "${{ inputs.workdir }}" != "." ] && [ -f "${{ inputs.workdir }}/$f" ]; then
-              FILES="$FILES ${{ inputs.workdir }}/$f"
-            fi
+            [ -n "$DIR_FOUND" ] && [ -f "$DIR_FOUND/$f" ] && FILES="$FILES $DIR_FOUND/$f"
           done
-          if [ -z "$FILES" ]; then
-            echo "[INFO] Không có CSV để commit."
-            exit 0
-          fi
+          [ -z "$FILES" ] && { echo "[INFO] Không có CSV để commit."; exit 0; }
 
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote set-url origin "https://x-access-token:${PUSH_TOKEN}@github.com/${PRIVATE_REPO}.git"
+          git remote set-url origin "https://x-access-token:${TOKEN}@github.com/${PRIVATE_REPO}.git"
 
           CURBR=$(git rev-parse --abbrev-ref HEAD || true)
-          if [ "$CURBR" = "HEAD" ]; then
-            git checkout -b ci-state-update
-          fi
+          [ "$CURBR" = "HEAD" ] && git checkout -b ci-state-update
 
           git add -- $FILES
-          if git diff --cached --quiet; then
-            echo "[INFO] Không có thay đổi trong CSV."
-            exit 0
-          fi
-
+          git diff --cached --quiet && { echo "[INFO] Không có thay đổi."; exit 0; }
           git commit -m "ci(state): update image_done.csv, links_done.csv, tieudedalay.csv"
           git push origin HEAD:"${PRIVATE_REF}"
 
+      # Commit & PUSH 3 CSV về repo PRIVATE qua SSH (nếu checkout bằng SSH)
+      - name: Commit & push state CSVs back to PRIVATE (SSH)
+        if: ${{ steps.auth.outputs.mode == 'ssh' }}
+        working-directory: private-src
+        env:
+          PRIVATE_SSH_KEY: ${{ secrets.PRIVATE_SSH_KEY }}
+          PRIVATE_REPO: ${{ steps.params.outputs.repo }}
+          PRIVATE_REF: ${{ steps.params.outputs.ref }}
+          DIR_FOUND: ${{ steps.find_script.outputs.dir }}
+        run: |
+          set -e
+          [ -z "$PRIVATE_SSH_KEY" ] && { echo "::warning::Thiếu PRIVATE_SSH_KEY. Bỏ qua commit."; exit 0; }
+
+          install -m 700 -d ~/.ssh
+          echo "$PRIVATE_SSH_KEY" > ~/.ssh/id_deploy
+          chmod 600 ~/.ssh/id_deploy
+          eval "$(ssh-agent -s)"
+          ssh-add ~/.ssh/id_deploy
+          printf "Host github.com\n  StrictHostKeyChecking accept-new\n" >> ~/.ssh/config
+
+          FILES=""
+          for f in image_done.csv links_done.csv tieudedalay.csv; do
+            [ -f "$f" ] && FILES="$FILES $f"
+            [ -n "$DIR_FOUND" ] && [ -f "$DIR_FOUND/$f" ] && FILES="$FILES $DIR_FOUND/$f"
+          done
+          [ -z "$FILES" ] && { echo "[INFO] Không có CSV để commit."; exit 0; }
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "git@github.com:${PRIVATE_REPO}.git"
+
+          CURBR=$(git rev-parse --abbrev-ref HEAD || true)
+          [ "$CURBR" = "HEAD" ] && git checkout -b ci-state-update
+
+          git add -- $FILES
+          git diff --cached --quiet && { echo "[INFO] Không có thay đổi."; exit 0; }
+          git commit -m "ci(state): update image_done.csv, links_done.csv, tieudedalay.csv"
+          git push origin HEAD:"${PRIVATE_REF}"
