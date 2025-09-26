@@ -1,32 +1,12 @@
 name: run-private-code
-on:
-  workflow_dispatch: {}
-  schedule:
-    # 10:00 Asia/Bangkok (UTC+7) → 03:00 UTC
-    - cron: "0 4 * * *"
-    # 13:00 Asia/Bangkok (UTC+7) → 06:00 UTC
-    - cron: "0 6 * * *"
-    # 16:00 Asia/Bangkok (UTC+7) → 09:00 UTC
-    - cron: "0 9 * * *"
 
-    inputs:
-      private_repo:
-        description: 'owner/repo của PRIVATE'
-        required: true
-        default: 'rileyox9glg3e7t6navc-sketch/rieng-tu'
-      private_ref:
-        description: 'Nhánh/tag trong PRIVATE'
-        required: true
-        default: 'main'
-      workdir:
-        description: 'Thư mục chạy trong PRIVATE (chứa scripts/generate_thumbnails.py)'
-        required: true
-        default: '.'
-      youtube_privacy:
-        description: 'Trạng thái khi đăng YouTube'
-        type: choice
-        options: ['public', 'unlisted', 'private']
-        default: 'public'
+on:
+  schedule:
+    - cron: '0 3 * * *'   # 10:00 VN
+    - cron: '0 6 * * *'   # 13:00 VN
+    - cron: '0 9 * * *'   # 16:00 VN
+  workflow_dispatch: {}
+
 
 jobs:
   run-private:
