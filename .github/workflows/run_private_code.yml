@@ -54,6 +54,9 @@ jobs:
           wd="${{ inputs.workdir }}";        [ -z "$wd" ]  && wd=".";                                               echo "workdir=$wd" >> "$GITHUB_OUTPUT"
           privacy="${{ inputs.youtube_privacy }}"; [ -z "$privacy" ] && privacy="public";                           echo "privacy=$privacy" >> "$GITHUB_OUTPUT"
 
+      - name: Export resolved privacy to env
+        run: echo "YOUTUBE_PRIVACY=${{ steps.params.outputs.privacy }}" >> "$GITHUB_ENV"
+
 
       # KÉO CODE từ repo PRIVATE (PAT)
       - name: Checkout PRIVATE via PAT
